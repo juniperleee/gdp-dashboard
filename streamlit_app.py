@@ -1,151 +1,417 @@
+
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import folium
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+from io import BytesIO
+from folium.plugins import MarkerCluster
+from streamlit_folium import st_folium
+
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Table,
+    TableStyle,
+    Paragraph,
+    Spacer
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import landscape, A4
+
+
+# =========================
+# CONFIGURAÇÃO DA PÁGINA
+# =========================
+
+st.set_page_config(
+    page_title="Mapa de Postos",
+    layout="wide"
+)
+
+
+# =========================
+# LEITURA DOS DADOS
+# =========================
 
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def carregar_dados():
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    df = pd.read_excel("mapa_global_atualizado.xlsx")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # =========================
+    # PADRONIZAR COORDENADAS
+    # =========================
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+    df["Latitude"] = (
+        df["Latitude"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    df["Longitude"] = (
+        df["Longitude"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+    )
 
-    return gdp_df
+    # Converter para float
+    df["Latitude"] = pd.to_numeric(
+        df["Latitude"],
+        errors="coerce"
+    )
 
-gdp_df = get_gdp_data()
+    df["Longitude"] = pd.to_numeric(
+        df["Longitude"],
+        errors="coerce"
+    )
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    return df[
+        [
+            "Cidade",
+            "Posto",
+            "Endereço",
+            "Localização google maps",
+            "Forma de coleta",
+            "TD",
+            "Territórios de Desenvolvimento",
+            "Central de Emissão",
+            "Latitude",
+            "Longitude"
+        ]
+    ]
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+df = carregar_dados()
 
-# Add some spacing
-''
-''
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# =========================
+# TÍTULOS
+# =========================
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+st.title("Instituto de Cidadania Digital - Félix Pacheco")
+st.subheader("Unidades de Serviços Digitais")
 
-countries = gdp_df['Country Code'].unique()
 
-if not len(countries):
-    st.warning("Select at least one country")
+# =========================
+# FILTROS
+# =========================
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+col1, col2, col3 = st.columns(3)
 
-''
-''
-''
+with col1:
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+    territorio = st.selectbox(
+        "Território de Desenvolvimento",
+        ["Todos"] + sorted(
+            df["Territórios de Desenvolvimento"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+    )
 
-st.header('GDP over time', divider='gray')
+with col2:
 
-''
+    tipo_posto = st.selectbox(
+        "Tipo de Posto",
+        ["Todos"] + sorted(
+            df["Forma de coleta"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+    )
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+with col3:
+
+    central = st.selectbox(
+        "Central de Emissão",
+        ["Todos"] + sorted(
+            df["Central de Emissão"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+    )
+
+
+# =========================
+# APLICAR FILTROS
+# =========================
+
+if territorio != "Todos":
+
+    df = df.query(
+        "`Territórios de Desenvolvimento` == @territorio"
+    )
+
+if tipo_posto != "Todos":
+
+    df = df.query(
+        "`Forma de coleta` == @tipo_posto"
+    )
+
+if central != "Todos":
+
+    df = df.query(
+        "`Central de Emissão` == @central"
+    )
+
+
+# =========================
+# INDICADORES
+# =========================
+
+TOTAL_MUNICIPIOS_ESTADO = 224
+
+municipios_digitais = (
+    df[
+        df["Forma de coleta"]
+        .astype(str)
+        .str.contains("digital", case=False, na=False)
+    ]["Cidade"]
+    .nunique()
 )
 
-''
-''
+postos_digitais = len(
+    df[
+        df["Forma de coleta"]
+        .astype(str)
+        .str.contains("digital", case=False, na=False)
+    ]
+)
+
+municipios_filtrados = df["Cidade"].nunique()
+
+meta_atual = df["Cidade"].nunique()
+
+if meta_atual == 0:
+    meta_atual = 1
+
+municipios_sem_digital = (
+    meta_atual - municipios_digitais
+)
+
+percentual_digital = (
+    municipios_digitais / meta_atual
+) * 100
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+# =========================
+# MÉTRICAS
+# =========================
 
-st.header(f'GDP in {to_year}', divider='gray')
+col1, col2, col3, col4 = st.columns(4)
 
-''
+col1.metric(
+    "Postos digitais",
+    postos_digitais
+)
 
-cols = st.columns(4)
+col2.metric(
+    "Municípios digitais",
+    municipios_digitais
+)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+col3.metric(
+    "Municípios sem digital",
+    municipios_sem_digital
+)
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
+col4.metric(
+    "Cobertura digital",
+    f"{percentual_digital:.1f}%"
+)
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+st.progress(percentual_digital / 100)
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+st.caption(
+    f"{municipios_digitais} de "
+    f"{meta_atual} municípios "
+    f"com posto digital"
+)
+
+st.divider()
+
+
+# =========================
+# MAPA
+# =========================
+
+st.subheader("Mapa dos Postos")
+
+mapa = folium.Map(
+    location=[-5.20, -42.75],
+    zoom_start=7
+)
+
+marker_cluster = MarkerCluster().add_to(mapa)
+
+for _, row in df.iterrows():
+
+    lat = row["Latitude"]
+    lon = row["Longitude"]
+
+    # Ignorar coordenadas inválidas
+    if pd.isna(lat) or pd.isna(lon):
+        continue
+
+    forma = str(row["Forma de coleta"]).lower()
+
+    if "digital" in forma:
+        cor = "green"
+
+    elif "manual" in forma:
+        cor = "blue"
+
+    else:
+        cor = "red"
+
+    popup = f"""
+    <b>{row['Cidade']}</b><br>
+    <b>Posto:</b> {row['Posto']}<br>
+    <b>Coleta:</b> {row['Forma de coleta']}<br>
+    <b>Central:</b> {row['Central de Emissão']}
+    """
+
+    folium.Marker(
+        location=[lat, lon],
+        popup=popup,
+        tooltip=row["Cidade"],
+        icon=folium.Icon(color=cor)
+    ).add_to(marker_cluster)
+
+st_folium(
+    mapa,
+    width="100%",
+    height=600
+)
+
+st.divider()
+
+
+# =========================
+# TABELA
+# =========================
+
+df = df.reset_index(drop=True)
+
+df.index = df.index + 1
+
+df_tabela = df[
+    [
+        "Cidade",
+        "Posto",
+        "Forma de coleta",
+        "Central de Emissão",
+        "Territórios de Desenvolvimento"
+    ]
+]
+
+st.subheader("Tabela de Postos")
+
+st.dataframe(
+    df_tabela,
+    use_container_width=True
+)
+
+
+# =========================
+# DOWNLOAD PDF
+# =========================
+
+st.divider()
+
+if st.button("Gerar relatório PDF"):
+
+    pdf_buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        pdf_buffer,
+        pagesize=landscape(A4),
+        rightMargin=20,
+        leftMargin=20,
+        topMargin=20,
+        bottomMargin=20
+    )
+
+    styles = getSampleStyleSheet()
+
+    elementos = []
+
+    titulo = Paragraph(
+        "Relatório de Postos de Identificação",
+        styles["Title"]
+    )
+
+    elementos.append(titulo)
+
+    elementos.append(Spacer(1, 12))
+
+    filtros_texto = f"""
+    Território: {territorio}<br/>
+    Tipo de posto: {tipo_posto}<br/>
+    Central de emissão: {central}<br/>
+    Quantidade total de postos: {len(df)}<br/>
+    Municípios com posto digital: {municipios_digitais} de {TOTAL_MUNICIPIOS_ESTADO}<br/>
+    Cobertura digital estadual: {percentual_digital:.1f}%
+    """
+
+    filtros = Paragraph(
+        filtros_texto,
+        styles["BodyText"]
+    )
+
+    elementos.append(filtros)
+
+    elementos.append(Spacer(1, 12))
+
+    dados_tabela = [[
+        "Nº",
+        "Município",
+        "Central de Emissão",
+        "Tipo de Posto"
+    ]]
+
+    for indice, row in df.iterrows():
+
+        dados_tabela.append([
+            str(indice),
+            str(row["Cidade"]),
+            str(row["Central de Emissão"]),
+            str(row["Forma de coleta"])
+        ])
+
+    tabela = Table(
+        dados_tabela,
+        colWidths=[40, 180, 180, 140]
+    )
+
+    tabela.setStyle(TableStyle([
+
+        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+
+        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+
+    ]))
+
+    elementos.append(tabela)
+
+    doc.build(elementos)
+
+    st.download_button(
+        label="Baixar PDF",
+        data=pdf_buffer.getvalue(),
+        file_name="relatorio_postos.pdf",
+        mime="application/pdf"
+    )
+
